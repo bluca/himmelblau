@@ -309,6 +309,16 @@ macro_rules! impl_himmelblau_hello_key_helpers {
         fn fetch_hello_totp_key_tag(&self, account_id: &str) -> String {
             format!("{}/hello_totp", account_id.to_lowercase())
         }
+
+        /// Tag for the machine-key-sealed PRT stored in the keystore.
+        /// Unlike hello_prt (which requires the user's PIN to unseal),
+        /// this PRT is sealed only with the TPM machine key and can be
+        /// loaded without user interaction. Used by the broker to
+        /// generate SSO cookies after a daemon restart.
+        #[allow(dead_code)]
+        fn fetch_broker_prt_key_tag(&self, account_id: &str) -> String {
+            format!("{}/broker_prt", account_id.to_lowercase())
+        }
     };
 }
 
@@ -348,6 +358,12 @@ macro_rules! load_cached_prt {
                 .refresh_cache
                 .add($account_id, &RefreshCacheEntry::Prt(prt.clone()))
                 .await;
+            // Also persist the machine-key-sealed PRT for the broker so
+            // SSO cookies survive daemon restarts without needing the PIN.
+            let broker_prt_tag = $self.fetch_broker_prt_key_tag($account_id);
+            if let Err(e) = $keystore.insert_tagged_hsm_key(&broker_prt_tag, &prt) {
+                debug!("Failed to persist broker PRT from cached hello PRT: {:?}", e);
+            }
         }
     };
 }
@@ -761,6 +777,12 @@ macro_rules! seal_prt_with_existing_hello_key {
                             "Failed to cache hello prt after reauth for {}: {:?}",
                             $account_id, e
                         );
+                    }
+                    // Also persist the machine-key-sealed PRT for the
+                    // broker so SSO cookies survive daemon restarts.
+                    let broker_prt_tag = $self.fetch_broker_prt_key_tag($account_id);
+                    if let Err(e) = $keystore.insert_tagged_hsm_key(&broker_prt_tag, prt) {
+                        debug!("Failed to persist broker PRT after reauth: {:?}", e);
                     }
                 }
                 Err(e) => {
