@@ -895,18 +895,18 @@ impl IdProvider for HimmelblauProvider {
         impl_check_online!(self, tpm, now)
     }
 
-    #[instrument(skip(self, id, old_token, keystore, tpm, machine_key))]
+    #[instrument(skip(self, id, old_token, _keystore, tpm, machine_key))]
     async fn unix_user_access<D: KeyStoreTxn + Send>(
         &self,
         id: &Id,
         scopes: Vec<String>,
         old_token: Option<&UserToken>,
         client_id: Option<String>,
-        keystore: &mut D,
+        _keystore: &mut D,
         tpm: &mut tpm::provider::BoxedDynTpm,
         machine_key: &tpm::structures::StorageKey,
     ) -> Result<UnixUserToken, IdpError> {
-        let result = impl_unix_user_access!(
+        impl_unix_user_access!(
             self,
             old_token,
             scopes,
@@ -916,50 +916,7 @@ impl IdProvider for HimmelblauProvider {
             machine_key,
             entra_id_prt_token_fetch,
             entra_id_refresh_token_token_fetch
-        );
-
-        // After a successful PRT-based token acquisition, refresh the PRT
-        // so that subsequent SSO cookie requests use a fresh PRT.
-        // This matches the reference implementation, which refreshes the
-        // PRT during acquireTokenSilently when it is older than 4 hours.
-        if result.is_ok() {
-            let account_id = match old_token {
-                Some(token) => token.spn.clone(),
-                None => id.to_string().clone(),
-            };
-            if let Ok(RefreshCacheEntry::Prt(prt)) =
-                self.refresh_cache.refresh_token(&account_id).await
-            {
-                match self
-                    .client
-                    .read()
-                    .await
-                    .exchange_prt_for_prt(&prt, tpm, machine_key, false)
-                    .await
-                {
-                    Ok(new_prt) => {
-                        debug!("PRT refreshed successfully after access token exchange");
-                        self.refresh_cache
-                            .add(&account_id, &RefreshCacheEntry::Prt(new_prt.clone()))
-                            .await;
-                        // Also persist to keystore so SSO cookies survive
-                        // daemon restarts.
-                        let broker_prt_tag = self.fetch_broker_prt_key_tag(&account_id);
-                        if let Err(e) = keystore.insert_tagged_hsm_key(&broker_prt_tag, &new_prt) {
-                            debug!("Failed to persist refreshed PRT to keystore: {:?}", e);
-                        }
-                    }
-                    Err(e) => {
-                        // PRT refresh failure is non-fatal; the existing PRT
-                        // remains valid and SSO cookies will continue to work
-                        // until the PRT eventually expires.
-                        debug!("PRT refresh after access token exchange failed (non-fatal): {:?}", e);
-                    }
-                }
-            }
-        }
-
-        result
+        )
     }
 
     #[instrument(skip_all)]
@@ -1025,7 +982,7 @@ impl IdProvider for HimmelblauProvider {
         id: &Id,
         old_token: Option<&UserToken>,
         sso_nonce: Option<&str>,
-        keystore: &mut D,
+        _keystore: &mut D,
         tpm: &mut tpm::provider::BoxedDynTpm,
         machine_key: &tpm::structures::StorageKey,
     ) -> Result<String, IdpError> {
@@ -1042,40 +999,15 @@ impl IdProvider for HimmelblauProvider {
             Some(token) => token.spn.clone(),
             None => id.to_string().clone(),
         };
-        let broker_prt_tag = self.fetch_broker_prt_key_tag(&account_id);
-
-        // Try the in-memory cache first, then fall back to persistent
-        // keystore (survives daemon restarts).
-        let prt = match self.refresh_cache.refresh_token(&account_id).await {
-            Ok(RefreshCacheEntry::Prt(prt)) => prt,
-            _ => {
-                // Mem cache miss — try the keystore
-                match keystore.get_tagged_hsm_key::<SealedData>(&broker_prt_tag) {
-                    Ok(Some(prt)) => {
-                        debug!("Loaded PRT from persistent keystore");
-                        // Repopulate the mem cache so subsequent calls
-                        // are fast and other code paths can use it.
-                        self.refresh_cache
-                            .add(&account_id, &RefreshCacheEntry::Prt(prt.clone()))
-                            .await;
-                        prt
-                    }
-                    _ => {
-                        debug!("No PRT available in refresh cache or keystore");
-                        return Err(IdpError::NotFound {
-                            what: "account_id".to_string(),
-                            where_: "refresh_cache".to_string(),
-                        });
-                    }
-                }
+        let refresh_cache_entry = self.refresh_cache.refresh_token(&account_id).await?;
+        let prt = match refresh_cache_entry {
+            RefreshCacheEntry::Prt(prt) => prt,
+            RefreshCacheEntry::RefreshToken(_) => {
+                // We need a PRT to fetch a PRT cookie
+                debug!("No PRT available in refresh cache");
+                return Err(IdpError::BadRequest);
             }
         };
-
-        // Persist the machine-key-sealed PRT so it survives daemon restarts.
-        if let Err(e) = keystore.insert_tagged_hsm_key(&broker_prt_tag, &prt) {
-            debug!("Failed to persist broker PRT to keystore: {:?}", e);
-        }
-
         self.client
             .read()
             .await
@@ -2812,12 +2744,6 @@ impl IdProvider for HimmelblauProvider {
                             let uuid = token.uuid().map(|v| v.to_string()).unwrap_or("".to_string());
                             error!("Failed to cache hello prt for {}: {:?}", uuid, e);
                         }
-                    }
-                    // Also persist the machine-key-sealed PRT for the
-                    // broker so SSO cookies survive daemon restarts.
-                    let broker_prt_tag = self.fetch_broker_prt_key_tag(account_id);
-                    if let Err(e) = keystore.insert_tagged_hsm_key(&broker_prt_tag, prt) {
-                        debug!("Failed to persist broker PRT during online auth: {:?}", e);
                     }
                 } else {
                     // If there is no PRT, cache the refresh token instead
