@@ -30,7 +30,12 @@ def matrix(channel, tag="", revision="", distro="all", architecture="all", today
     elif channel == "nightly":
         if tag or revision:
             raise ValueError("Nightly DDIs always use main, without a tag or revision override")
-        source_sha = tag_sha = packages.resolve("refs/remotes/origin/main")
+        source_ref = "refs/remotes/origin/main"
+        if (os.environ.get("GITHUB_REPOSITORY") == "bluca/himmelblau"
+                and os.environ.get("GITHUB_REF") == "refs/heads/ddi"
+                and os.environ.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch")):
+            source_ref = os.environ["GITHUB_SHA"]
+        source_sha = tag_sha = packages.resolve(source_ref)
         upstream = packages.version(source_sha)
         if not re.fullmatch(r"\d+\.\d+\.\d+", upstream):
             raise ValueError("Nightly source must have a MAJOR.MINOR.PATCH workspace version")

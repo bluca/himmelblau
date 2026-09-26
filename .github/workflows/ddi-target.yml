@@ -14,7 +14,7 @@ on:
         type: boolean
     secrets:
       CLOUDSMITH_PACKAGE_PUBLISHER:
-        required: true
+        required: false
       PACKAGE_SIGNING_KEY:
         required: true
       PACKAGE_SIGNING_PASSPHRASE:
@@ -39,12 +39,9 @@ jobs:
           ref: ${{ inputs.tooling_sha }}
           path: tooling
           persist-credentials: false
-      - name: Check Cloudsmith for the signed raw images
+      - name: Force a fork test build
         id: check
-        env:
-          TARGET_SPEC: ${{ inputs.spec }}
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
-        run: python3 tooling/.github/scripts/ddi.py preflight
+        run: echo "build_required=true" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
@@ -95,7 +92,7 @@ jobs:
           TARGET_SPEC: ${{ inputs.spec }}
           SCC_EMAIL: ${{ fromJSON(inputs.spec).scc && secrets.SCC_EMAIL || '' }}
           SCC_REGCODE: ${{ fromJSON(inputs.spec).scc && secrets.SCC_REGCODE || '' }}
-          BUILD_CONTAINER_CACHE_REF: ${{ steps.cache-login.outcome == 'success' && steps.cache-builder.outcome == 'success' && format('ghcr.io/himmelblau-idm/himmelblau-build-cache:v1-{0}-{1}', fromJSON(inputs.spec).distro, fromJSON(inputs.spec).architecture) || '' }}
+          BUILD_CONTAINER_CACHE_REF: ''
           REFRESH_BUILD_CONTAINER: ${{ inputs.refresh_build_container }}
         run: |
           BUILD_ARGS=(--source source --artifacts payloads --container-cache-ref "$BUILD_CONTAINER_CACHE_REF")
@@ -152,6 +149,7 @@ jobs:
           retention-days: 14
 
   publish:
+    if: ${{ false }}
     needs: sign
     runs-on: ubuntu-24.04
     timeout-minutes: 30

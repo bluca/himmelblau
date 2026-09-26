@@ -1,6 +1,8 @@
 name: Build and publish signed DDIs
 
 on:
+  push:
+    branches: [ddi]
   schedule:
     - cron: '0 2 * * *'
   workflow_dispatch:
@@ -54,7 +56,7 @@ on:
         default: false
     secrets:
       CLOUDSMITH_PACKAGE_PUBLISHER:
-        required: true
+        required: false
       PACKAGE_SIGNING_KEY:
         required: true
       PACKAGE_SIGNING_PASSPHRASE:
@@ -68,15 +70,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ddis-${{ inputs.channel || 'nightly' }}-${{ inputs.tag || 'main' }}-${{ inputs.distro || 'all' }}-${{ inputs.architecture || 'all' }}
+  group: ddis-${{ inputs.channel || 'nightly' }}-${{ inputs.tag || 'ddi' }}-${{ inputs.distro || 'fedora44' }}-${{ inputs.architecture || 'amd64' }}
   cancel-in-progress: false
 
 jobs:
   prepare:
     if: >-
-      github.repository == 'himmelblau-idm/himmelblau' &&
-      (github.event_name != 'workflow_dispatch' ||
-       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      github.repository == 'bluca/himmelblau' &&
+      github.ref == 'refs/heads/ddi' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -86,7 +88,7 @@ jobs:
       - name: Checkout trusted release tooling and history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tooling_sha || github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Validate sources and select every supported DDI target
@@ -95,8 +97,8 @@ jobs:
           DDI_CHANNEL: ${{ inputs.channel || 'nightly' }}
           RELEASE_TAG: ${{ inputs.tag }}
           REQUESTED_REVISION: ${{ inputs.revision }}
-          REQUESTED_DISTRO: ${{ inputs.distro }}
-          REQUESTED_ARCHITECTURE: ${{ inputs.architecture }}
+          REQUESTED_DISTRO: ${{ inputs.distro || 'fedora44' }}
+          REQUESTED_ARCHITECTURE: ${{ inputs.architecture || 'amd64' }}
         run: python3 .github/scripts/ddi.py prepare
 
   images:

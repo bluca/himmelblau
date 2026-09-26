@@ -228,6 +228,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gnupg gpgsm openssl systemd erofs-utils cryptsetup-bin
+      - name: Test matrices, publication and signed images without containers
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
   nss-helper:
     name: NSS helper
