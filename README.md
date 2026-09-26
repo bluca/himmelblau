@@ -273,6 +273,28 @@ Packages will be written to `./packaging/`. You can then copy them to a target m
 > its free BCI base with the Leap 16 OSS repository. No SCC credentials are
 > required.
 
+### Portable Service and sysext DDIs
+
+GitHub Actions builds signed [Discoverable Disk Images (DDIs)](https://uapi-group.org/specifications/specs/discoverable_disk_image/)
+and publishes them as **Cloudsmith raw packages** alongside the distribution
+packages.
+
+For each architecture, there is one
+[**Portable Service DDI**](https://systemd.io/PORTABLE_SERVICES/), based on the
+highest numbered supported Fedora release (Rawhide excluded). It contains the
+daemon binaries, their dependencies and runtime helpers, and their unit files.
+This image can be installed as both as system Portable Service, for the system
+units, and as a per-user session Portable Service, for the broker user unit.
+
+Each distro/release/architecture also gets a **sysext DDI** containing
+`aad-tool`, PAM and NSS modules, using that distribution's library paths and host
+libraries, tmpfiles.d and documentation. Each sysext can be installed on the
+respective distribution/release, as a companion to the distribution-agnostic
+Portable Service DDI.
+
+Installed together, these two images make it possible to install and use Himmelblau
+on any immutable image-based Linux installation.
+
 ### Uninstall
 
 ```bash

@@ -1,0 +1,7 @@
+FROM docker.io/library/archlinux:base-devel
+
+RUN pacman --sync --refresh --sysupgrade --noconfirm \
+    clang cmake dbus gettext git krb5 libcap libunistring openssl pam \
+    pcre2 pkgconf python rust sqlite systemd tar tpm2-tss
+
+WORKDIR /source

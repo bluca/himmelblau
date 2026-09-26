@@ -1,0 +1,13 @@
+ARG ARCH=amd64
+FROM --platform=linux/amd64 docker.io/gentoo/portage:latest AS portage
+FROM docker.io/gentoo/stage3:${ARCH}-systemd
+
+COPY --from=portage /var/db/repos/gentoo /var/db/repos/gentoo
+
+RUN emerge --getbinpkg --oneshot \
+    app-arch/tar app-crypt/mit-krb5 app-crypt/tpm2-tss dev-build/cmake dev-db/sqlite \
+    dev-lang/rust-bin dev-libs/libpcre2 dev-libs/libunistring dev-libs/openssl \
+    dev-vcs/git llvm-core/clang sys-apps/dbus sys-devel/gettext \
+    sys-libs/libcap sys-libs/pam virtual/libudev virtual/pkgconfig
+
+WORKDIR /source

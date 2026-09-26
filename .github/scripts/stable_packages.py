@@ -106,6 +106,11 @@ def matrix(tag, revision="", distro="all", architecture="all"):
         raise ValueError("Source must descend from the release tag and belong to its stable branch")
     if version(tag_sha) != tag or version(source_sha) != tag:
         raise ValueError("Tag and source Cargo workspace versions must both match the release tag")
+    return source_matrix(tag, tag_sha, source_sha, REPOSITORIES[major], distro, architecture)
+
+
+def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architecture="all"):
+    """Describe package builds after the caller has validated source provenance."""
     if architecture not in {"all", *ARCHITECTURES}:
         raise ValueError("Architecture must be all, amd64 or arm64")
     dists, packages = generator_config(source_text(source_sha, "scripts/gen_dockerfiles.py"))
@@ -148,7 +153,7 @@ def matrix(tag, revision="", distro="all", architecture="all"):
             if architecture not in {"all", arch} or (arch == "arm64" and not cfg.get("arm64", True)):
                 continue
             spec = {"tag": tag, "tag_sha": tag_sha, "source_sha": source_sha,
-                    "repository": REPOSITORIES[major], "distro": target,
+                    "repository": repository, "distro": target,
                     "destination": DESTINATIONS[target], "format": fmt,
                     "architecture": arch, "scc": bool(cfg.get("scc")),
                     "supported_architectures": [
@@ -179,6 +184,8 @@ def prepare():
     output("tooling_sha", resolve("HEAD"))
     output("enabled", "true")
     first = json.loads(result["include"][0]["spec"])
+    output("source_sha", first["source_sha"])
+    output("tag", tag)
     summary(f"Release `{tag}` (tag commit `{first['tag_sha']}`), source `{first['source_sha']}`; {len(result['include'])} build targets.")
 
 
@@ -286,7 +293,10 @@ def build(source, artifacts, spec, *, container_cache_ref="", refresh_build_cont
             if sorted(names) != sorted(spec["expected"]):
                 raise ValueError(f"Incomplete or unexpected package set: expected {spec['expected']}, got {names}")
             validate_package_identities(records, spec)
-            (artifacts / "manifest.json").write_text(json.dumps({"spec": spec, "packages": records}, indent=2) + "\n")
+            os_release = run("docker", "run", "--rm", "--platform", spec["platform"],
+                             "--network", "none", "--entrypoint", "cat", image, "/etc/os-release")
+            (artifacts / "manifest.json").write_text(json.dumps(
+                {"spec": spec, "packages": records, "os_release": os_release}, indent=2) + "\n")
             summary(f"Built `{spec['distro']}` / `{spec['architecture']}` for `{spec['tag']}` from `{spec['source_sha']}`: {len(records)} packages.")
         finally:
             subprocess.run(["docker", "image", "rm", "-f", image], check=False, stdout=subprocess.DEVNULL)
@@ -301,7 +311,7 @@ def api_packages(repository, fmt, tag=None, distribution=None):
         if distribution:
             search += f" distribution:{distribution}"
         if tag:
-            search += f" version:{tag}-*"
+            search += f" version:{tag}" + ("" if fmt == "raw" else "-*")
         query = urllib.parse.urlencode({"query": search, "page_size": 100, "page": page})
         request = urllib.request.Request(f"https://api.cloudsmith.io/v1/packages/{repository}/?{query}",
                                          headers={"X-Api-Key": os.environ["CLOUDSMITH_API_KEY"]})
