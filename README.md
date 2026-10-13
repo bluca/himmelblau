@@ -303,6 +303,63 @@ Portable Service DDI.
 Installed together, these two images make it possible to install and use Himmelblau
 on any immutable image-based Linux installation.
 
+#### Updating the images with systemd-sysupdate
+
+Each sysext includes a `himmelblau` update component under
+`/usr/lib/sysupdate.himmelblau.d/`. Its two `.transfer` files update the
+distribution-specific sysext and the portable image together, using the same
+version, channel and architecture. It is separate from the host OS update
+component so unrelated OS versions do not constrain Himmelblau updates.
+This configuration requires systemd 257 or newer.
+
+The sources use stable Cloudsmith URLs of the form:
+
+```text
+https://dl.cloudsmith.io/public/himmelblau/v_4/raw/names/<image-stream>/files/
+```
+
+Each stream publishes `SHA256SUMS` and its detached OpenPGP signature,
+`SHA256SUMS.gpg`, next to the versioned images. The checksum manifest lists all
+synchronized versions in that stream in GNU `sha256sum --binary` format.
+It is signed with the same RSA OpenPGP key used for the packages and DDIs.
+Images are uploaded before the manifests, publication is serialized, and
+the publisher verifies the stable checksum/signature URLs before reporting
+success. A client that encounters a temporarily mismatched pair during
+replacement rejects it and can retry later.
+
+`Verify=yes` is always enabled. On the target machine, provision the trusted
+package-signing public key in systemd's OpenPGP import keyring
+(`/etc/systemd/import-pubring.pgp`, or the legacy `.gpg` file), preserving any
+other keys already present. This is separate from the X.509 certificate used
+for dm-verity image trust. Do not disable verification or trust a downloaded
+key without checking its fingerprint through a trusted channel.
+
+The transfers keep three versions and protect the version of the installed
+sysext. Images are staged in versioned directories:
+
+* `/var/lib/portables/himmelblaud.raw.v/`
+* `/var/lib/extensions/himmelblau-<distro>.sysext.raw.v/`
+
+For an initial deployment, place the matching portable and sysext images in
+these directories and merge the sysext so its update definitions are visible.
+Then run on the target machine:
+
+```bash
+systemd-sysupdate --component=himmelblau list
+systemd-sysupdate --component=himmelblau update
+```
+
+Updates stage new image versions; they do not restart running services.
+Activate the new portable and sysext together by reattaching the portable
+using its `.raw.v` path and refreshing the sysext, or through the machine's
+normal reboot/activation procedure. Do not activate only one half of an update.
+
+CI artifacts include the images and their per-build `SHA256SUMS`/`.gpg` pair.
+Cloudsmith publication additionally signs cumulative per-stream manifests,
+including when a retry skips an already-published image build. The fork's
+existing publication-disable guard remains in place; no production uploads
+are enabled by this change.
+
 ### Uninstall
 
 ```bash

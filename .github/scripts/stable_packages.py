@@ -316,7 +316,7 @@ def build(source, artifacts, spec, *, container_cache_ref="", refresh_build_cont
             subprocess.run(["docker", "image", "rm", "-f", image], check=False, stdout=subprocess.DEVNULL)
 
 
-def api_packages(repository, fmt, tag=None, distribution=None):
+def api_packages(repository, fmt, tag=None, distribution=None, package_name=None):
     # Current-version checks stay narrow. Cleanup deliberately inventories the
     # format's history so it can remove untagged packages from older workflows.
     packages, page = [], 1
@@ -326,6 +326,8 @@ def api_packages(repository, fmt, tag=None, distribution=None):
             search += f" distribution:{distribution}"
         if tag:
             search += f" version:{tag}" + ("" if fmt == "raw" else "-*")
+        if package_name:
+            search += f" name:{package_name}"
         query = urllib.parse.urlencode({"query": search, "page_size": 100, "page": page})
         request = urllib.request.Request(f"https://api.cloudsmith.io/v1/packages/{repository}/?{query}",
                                          headers={"X-Api-Key": os.environ["CLOUDSMITH_API_KEY"]})

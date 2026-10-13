@@ -28,20 +28,25 @@ PORTABLE_RUNTIME_PACKAGES = {
         "glibc-common", "grep", "shadow-utils", "util-linux-core",
         # Fedora packages the HSM helper's systemd-creds in systemd itself.
         "systemd", "tpm2-tools",
+        # Fedora ships portablectl in systemd-container.
+        "systemd-container", "jq",
     ),
 }
 
 
 def run(command, *, capture=False, extra_env=None, **kwargs):
-    env = os.environ.copy()
-    for name in ("PACKAGE_SIGNING_KEY", "PACKAGE_SIGNING_PASSPHRASE", "CLOUDSMITH_API_KEY"):
-        env.pop(name, None)
+    explicit_env = kwargs.pop("env", None)
+    env = dict(os.environ if explicit_env is None else explicit_env)
     env.update(extra_env or {})
+    for name in ("PACKAGE_SIGNING_KEY", "PACKAGE_SIGNING_PASSPHRASE"):
+        env.pop(name, None)
+    if explicit_env is None:
+        env.pop("CLOUDSMITH_API_KEY", None)
     try:
         return subprocess.run(
             [str(arg) for arg in command], check=True,
             stdout=kwargs.pop("stdout", subprocess.PIPE if capture else None),
-            env=kwargs.pop("env", env), **kwargs,
+            env=env, **kwargs,
         )
     except subprocess.CalledProcessError as error:
         if command[0] in ("gpg", "gpgsm"):
@@ -172,16 +177,26 @@ def stage_portable(packages, root, fedora, architecture, version):
     run(dnf + ["clean", "all"])
     for name in ("himmelblaud", "himmelblaud_tasks"):
         validate_elf(resolve_in_root(root, "/usr/sbin/" + name), architecture)
-    validate_elf(root / "usr/bin/aad-tool", architecture)
+    for name in ("aad-tool", "portablectl", "jq"):
+        validate_elf(root / "usr/bin" / name, architecture)
     for name in ("himmelblaud.service", "himmelblaud-tasks.service", "himmelblau-hsm-pin-init.service"):
         if not (root / "usr/lib/systemd/system" / name).is_file():
             raise ValueError(f"Missing packaged unit: {name}")
+    for name in ("himmelblaud-sysupdate-notify.socket", "himmelblaud-sysupdate-notify@.service"):
+        unit = root / "usr/lib/systemd/system" / name
+        shutil.copyfile(CONFIG / name, unit)
+        unit.chmod(0o644)
+    notifier = root / "usr/libexec/himmelblaud-sysupdate-notify"
+    notifier.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(CONFIG / notifier.name, notifier)
+    notifier.chmod(0o755)
     for relative in (
         "proc", "sys", "dev", "run", "tmp", "var/tmp", "home",
         "run/himmelblaud", "etc/himmelblau", "etc/krb5.conf.d",
         "var/lib/himmelblaud", "var/cache/himmelblaud",
         "var/lib/private/himmelblaud", "var/cache/private/himmelblaud",
         "var/cache/nss-himmelblau", "var/cache/himmelblau-policies",
+        "var/lib/himmelblau-ddi",
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
     for relative in ("etc/machine-id", "etc/resolv.conf"):
@@ -298,6 +313,8 @@ class SigningMaterial:
     private_key: Path
     certificate: Path
     fingerprint: str
+    gpg_home: Path | None = None
+    passphrase_file: Path | None = None
 
 
 @contextmanager
@@ -351,13 +368,25 @@ def signing_material(work, env=None):
             run(gpgsm + ["--armor", "--output", pem, "--export-secret-key-p8", "&" + key["grp"]],
                 input=passphrase)
             run(["openssl", "pkey", "-in", pem, "-check", "-noout"])
-            yield SigningMaterial(pem, certificate, fingerprint)
+            yield SigningMaterial(pem, certificate, fingerprint, home, password)
         finally:
             if agent_pid is not None:
                 try:
                     os.kill(agent_pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+
+
+def sign_detached(source, signature, signing):
+    if signing.gpg_home is None or signing.passphrase_file is None:
+        raise ValueError("OpenPGP signing material is required for the sysupdate manifest")
+    run([
+        "gpg", "--homedir", signing.gpg_home, "--batch", "--yes",
+        "--pinentry-mode=loopback", "--passphrase-file", signing.passphrase_file,
+        "--local-user", signing.fingerprint + "!", "--detach-sign",
+        "--output", signature, source,
+    ])
+    signature.chmod(0o644)
 
 
 def extract_payload(payload, root):

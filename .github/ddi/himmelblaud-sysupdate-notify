@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+
+fail() {
+    printf 'himmelblaud-sysupdate-notify: %s\n' "$1" >&2
+    printf '{"error":"org.himmelblau.SysUpdate.Failed","parameters":{}}\0'
+    exit 1
+}
+
+IFS=
+if ! read -r -d '' -n 1048576 request; then
+    fail "Incomplete Varlink request"
+fi
+if ((${#request} >= 1048576)); then
+    fail "Varlink request is too large"
+fi
+
+if ! action=$(jq --slurp --exit-status --raw-output '
+    if length != 1 or (.[0] | type) != "object" then
+        error("Expected one Varlink request")
+    else .[0] end
+    | if .method != "io.systemd.SysUpdate.Notify.OnCompletedUpdate" then
+        error("Unsupported Varlink method")
+    elif (.parameters | type) != "object" then
+        error("Expected notification parameters")
+    elif (.parameters.component != null and (.parameters.component | type) != "string")
+         or (.parameters.version != null and (.parameters.version | type) != "string") then
+        error("Invalid component or version")
+    elif .parameters.component == "himmelblau"
+         and (.parameters.version | type == "string" and length > 0) then
+        "reattach"
+    else "ignore" end
+' <<<"$request"); then
+    fail "Invalid sysupdate notification"
+fi
+
+if [[ "$action" == reattach ]]; then
+    if (($# == 0)); then
+        fail "Missing reattach command"
+    fi
+    printf 'Reattaching Himmelblau after a completed DDI update\n' >&2
+    if ! "$@" >&2; then
+        fail "Portable reattachment failed"
+    fi
+fi
+
+printf '{"parameters":{}}\0'

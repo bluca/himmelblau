@@ -3,6 +3,7 @@
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import subprocess
 import tempfile
 import tarfile
 import time
+import urllib.error
+import urllib.request
 
 import ddi_image as image
 import stable_packages as packages
@@ -19,6 +22,10 @@ import stable_packages as packages
 
 SCRIPTS = Path(__file__).resolve().parent
 NIGHTLY_REPOSITORY = "himmelblau/v_4"
+CHECKSUM_FILES = {
+    "SHA256SUMS": ("sysupdate-checksums", "text/plain"),
+    "SHA256SUMS.gpg": ("sysupdate-signature", "application/pgp-signature"),
+}
 
 
 def matrix(channel, tag="", revision="", distro="all", architecture="all", today=None):
@@ -129,6 +136,45 @@ def expected_images(spec):
     return result
 
 
+def update_source(spec, record):
+    return f"https://dl.cloudsmith.io/public/{spec['repository']}/raw/names/{record['name']}/files"
+
+
+def install_sysupdate(root, spec):
+    directory = root / "usr/lib/sysupdate.himmelblau.d"
+    directory.mkdir(parents=True, exist_ok=True)
+    template = (image.CONFIG / "sysupdate.transfer.in").read_text()
+    records = expected_images({**spec, "version": "@v", "kinds": ["portable", "sysext"]})
+    for index, record in enumerate(records, start=1):
+        if record["kind"] == "portable":
+            target = "/var/lib/himmelblau-ddi/himmelblaud.v"
+        else:
+            target = f"/var/lib/extensions/himmelblau-{spec['distro']}.sysext.v"
+        (directory / f"{index * 10}-{record['kind']}.transfer").write_text(template.format(
+            version=spec["version"], source=update_source(spec, record),
+            pattern=record["filename"], target=target,
+        ))
+
+
+def format_checksums(checksums):
+    lines = []
+    for filename, digest in sorted(checksums.items()):
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*\.raw", filename)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ValueError("Invalid sysupdate image filename or SHA256 digest")
+        lines.append(f"{digest} *{filename}\n")
+    if not lines:
+        raise ValueError("A sysupdate manifest must contain at least one image")
+    return "".join(lines).encode("ascii")
+
+
+def write_checksums(directory, checksums, signing):
+    manifest = directory / "SHA256SUMS"
+    manifest.write_bytes(format_checksums(checksums))
+    manifest.chmod(0o644)
+    image.sign_detached(manifest, directory / "SHA256SUMS.gpg", signing)
+
+
 def remote_plan(spec, expected_hashes=None):
     remotes = packages.api_packages(spec["repository"], "raw", spec["version"])
     missing, pending = [], False
@@ -177,23 +223,31 @@ def preflight(spec):
 
 
 def validate_files(directory, spec, *, signed):
-    expected = {
+    images = {
         record["filename"] if signed else record["filename"] + ".tar"
         for record in expected_images(spec)
     }
+    expected = images | set(CHECKSUM_FILES) if signed else images
     if not directory.is_dir() or {p.name for p in directory.iterdir()} != expected:
         raise ValueError("Incomplete or unexpected DDI artifact set")
     for name in expected:
         path = directory / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_size < 4096:
+        minimum = 1 if name in CHECKSUM_FILES else 4096
+        if path.is_symlink() or not path.is_file() or path.stat().st_size < minimum:
             raise ValueError(f"Invalid DDI artifact: {name}")
-        if signed:
+        if name in CHECKSUM_FILES:
+            continue
+        elif signed:
             with path.open("rb") as stream:
                 stream.seek(512)
                 if stream.read(8) != b"EFI PART":
                     raise ValueError(f"Incorrect DDI artifact format: {name}")
         elif not tarfile.is_tarfile(path):
             raise ValueError(f"Incorrect DDI artifact format: {name}")
+    if signed and (directory / "SHA256SUMS").read_bytes() != format_checksums({
+        name: packages.digest(directory / name) for name in images
+    }):
+        raise ValueError("SHA256SUMS does not match the signed DDI artifacts")
 
 
 def build(source, artifacts, spec, *, container_cache_ref="", refresh_build_container=False):
@@ -244,6 +298,7 @@ def build(source, artifacts, spec, *, container_cache_ref="", refresh_build_cont
             "docker", "run", "--rm", "--platform", spec["platform"],
             "--security-opt", "label=disable",
             "--volume", f"{SCRIPTS}:/tooling:ro",
+            "--volume", f"{image.CONFIG}:/ddi:ro",
             "--volume", f"{source}:/source:ro",
             "--volume", f"{source / 'target'}:/source/target",
             "--volume", f"{package_dir}:/packages:ro",
@@ -276,6 +331,7 @@ def stage(request):
                 )
                 release = request["release"]
             image.extension_release(root, release, record["filename"], spec["version"], spec["architecture"])
+            install_sysupdate(root, spec)
         image.make_payload(root, Path("/output") / (record["filename"] + ".tar"))
 
 
@@ -293,6 +349,10 @@ def sign(artifacts, output, spec):
             for record in expected_images(spec):
                 image.sign_image(roots[record["kind"]], output / record["filename"],
                                  spec["architecture"], signing, record["kind"])
+            write_checksums(output, {
+                record["filename"]: packages.digest(output / record["filename"])
+                for record in expected_images(spec)
+            }, signing)
     validate_files(output, spec, signed=True)
 
 
@@ -315,9 +375,97 @@ def publish(artifacts, spec):
                      f"`{spec['distro']}/{spec['architecture']}` to `{spec['repository']}`.")
 
 
+def catalog_checksums(spec, record, rows):
+    checksums = {}
+    for remote in rows:
+        if remote.get("format") != "raw" or remote.get("name") != record["name"]:
+            continue
+        if remote.get("filename") in CHECKSUM_FILES:
+            continue
+        version = remote.get("version") or ""
+        pattern = r"\d+\.\d+\.\d+" if spec["channel"] == "stable" else r"\d{4}-\d{2}-\d{2}-[0-9a-f]+"
+        if not re.fullmatch(pattern, version):
+            raise ValueError(f"Invalid image version in sysupdate stream {record['name']}")
+        expected = expected_images({**spec, "version": version, "kinds": [record["kind"]]})[0]
+        filename = remote.get("filename")
+        if filename != expected["filename"] or filename in checksums:
+            raise ValueError(f"Unexpected or duplicate image in sysupdate stream {record['name']}")
+        if remote.get("is_sync_failed") or not remote.get("is_sync_completed"):
+            raise ValueError(f"Unsynchronized image in sysupdate stream {record['name']}")
+        checksums[filename] = remote.get("checksum_sha256") or ""
+    if record["filename"] not in checksums:
+        raise ValueError(f"The current image is missing from sysupdate stream {record['name']}")
+    format_checksums(checksums)
+    return checksums
+
+
+def verify_catalog_publication(spec, record, directory):
+    expected = {name: (directory / name).read_bytes() for name in CHECKSUM_FILES}
+    for attempt in range(30):
+        rows = packages.api_packages(spec["repository"], "raw", package_name=record["name"])
+        synchronized = True
+        for name, (version, _) in CHECKSUM_FILES.items():
+            matches = [row for row in rows if row.get("format") == "raw"
+                       and row.get("name") == record["name"] and row.get("version") == version]
+            if len(matches) > 1:
+                raise ValueError(f"Duplicate sysupdate metadata: {record['name']}/{name}")
+            if matches and matches[0].get("is_sync_failed"):
+                raise ValueError(f"Sysupdate metadata synchronization failed: {record['name']}/{name}")
+            synchronized &= bool(
+                matches and matches[0].get("is_sync_completed")
+                and matches[0].get("filename") == name
+                and matches[0].get("checksum_sha256") == hashlib.sha256(expected[name]).hexdigest()
+            )
+        if synchronized:
+            try:
+                for name, content in expected.items():
+                    request = urllib.request.Request(
+                        f"{update_source(spec, record)}/{name}",
+                        headers={"Cache-Control": "no-cache"},
+                    )
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        if response.read(len(content) + 1) != content:
+                            break
+                else:
+                    return
+            except (urllib.error.HTTPError, urllib.error.URLError) as error:
+                print(f"Sysupdate metadata is not available at its stable URL yet: {error}")
+        if attempt == 29:
+            raise RuntimeError(f"Sysupdate manifest/signature did not become available: {record['name']}")
+        time.sleep(10)
+
+
+def publish_checksums(spec):
+    packages.require_api_key()
+    streams = []
+    for record in expected_images(spec):
+        rows = packages.api_packages(spec["repository"], "raw", package_name=record["name"])
+        streams.append((record, catalog_checksums(spec, record, rows)))
+    with tempfile.TemporaryDirectory(prefix="sysupdate-publish-", dir=os.environ.get("RUNNER_TEMP")) as temporary:
+        work = Path(temporary)
+        with image.signing_material(work) as signing:
+            for record, checksums in streams:
+                directory = work / record["name"]
+                directory.mkdir()
+                write_checksums(directory, checksums, signing)
+                # Publish the manifest last. During replacement clients reject
+                # mismatched pairs rather than accepting unauthenticated data.
+                for filename in ("SHA256SUMS.gpg", "SHA256SUMS"):
+                    version, content_type = CHECKSUM_FILES[filename]
+                    image.run([
+                        "cloudsmith", "push", "raw", spec["repository"], directory / filename,
+                        "--name", record["name"], "--version", version,
+                        "--content-type", content_type, "--republish",
+                        "--tags", f"ddi,sysupdate,channel-{spec['channel']}",
+                    ], env=os.environ.copy())
+                verify_catalog_publication(spec, record, directory)
+                packages.summary(f"Published signed sysupdate manifest: `{update_source(spec, record)}` "
+                                 f"({len(checksums)} versions).")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "preflight", "build", "stage", "sign", "publish"))
+    parser.add_argument("command", choices=("prepare", "preflight", "build", "stage", "sign", "publish", "publish-checksums"))
     parser.add_argument("--source", type=Path, default=Path("source"))
     parser.add_argument("--artifacts", type=Path, default=Path("artifacts"))
     parser.add_argument("--output", type=Path, default=Path("signed"))
@@ -339,6 +487,8 @@ def main():
                       refresh_build_container=args.refresh_build_container)
             elif args.command == "sign":
                 sign(args.artifacts, args.output, spec)
+            elif args.command == "publish-checksums":
+                publish_checksums(spec)
             else:
                 publish(args.artifacts, spec)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as error:

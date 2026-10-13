@@ -56,7 +56,12 @@ def artifact(directory, record, signed):
     data = bytearray(8192)
     if signed:
         data[512:520] = b"EFI PART"
-        return write(directory, record["filename"], data)
+        path = write(directory, record["filename"], data)
+        write(directory, "SHA256SUMS", ddi.format_checksums({
+            item.name: packages.digest(item) for item in directory.glob("*.raw")
+        }))
+        write(directory, "SHA256SUMS.gpg", b"test signature")
+        return path
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / (record["filename"] + ".tar")
     with tarfile.open(path, "w") as archive:
@@ -271,7 +276,7 @@ class CloudsmithTests(unittest.TestCase):
             ddi.publish(Path("/unused"), self.spec)
         run.assert_not_called()
 
-    def test_publication_checks_the_uploaded_file_hash_without_a_sidecar(self):
+    def test_publication_checks_the_uploaded_file_hash_with_checksum_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for record in self.records:
@@ -285,7 +290,8 @@ class CloudsmithTests(unittest.TestCase):
                     patch.object(image, "run") as upload:
                 ddi.publish(directory, self.spec)
             self.assertEqual(upload.call_count, 2)
-            self.assertEqual({path.suffix for path in directory.iterdir()}, {".raw"})
+            self.assertEqual({path.name for path in directory.iterdir()},
+                             {record["filename"] for record in self.records} | set(ddi.CHECKSUM_FILES))
 
 
 class PayloadTests(unittest.TestCase):
@@ -602,8 +608,11 @@ class BuildTests(unittest.TestCase):
         self.assertIn("sudo --preserve-env=TARGET_SPEC,PACKAGE_SIGNING_KEY", sign_job)
         self.assertNotIn("source_sha", sign_job)
         self.assertNotIn("secrets.CLOUDSMITH", sign_job)
-        self.assertNotIn("secrets.PACKAGE_SIGNING", publish_job)
-        self.assertIn("path: signed/*.raw", sign_job)
+        self.assertIn("Sign and publish sysupdate manifests", publish_job)
+        self.assertIn("secrets.PACKAGE_SIGNING_KEY", publish_job)
+        self.assertNotIn("ref: ${{ fromJSON(inputs.spec).source_sha }}", publish_job)
+        self.assertIn("path: signed/", sign_job)
+        self.assertIn("needs: [preflight, sign]", publish_job)
         self.assertIn("queue: max", publish_job)
         self.assertIn("uses: ./.github/workflows/ddis.yml", (workflows / "stable-packages.yml").read_text())
         scheduled = (workflows / "ddis.yml").read_text()
@@ -634,8 +643,8 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("ddi.py preflight", preflight)
         self.assertIn("BUILD_CONTAINER_CACHE_REF: ''", target)
         self.assertNotIn("ghcr.io/himmelblau-idm/", target)
-        self.assertIn("  publish:\n    if: ${{ false }}", target)
-        self.assertIn("path: signed/*.raw", target)
+        self.assertIn("always() && false &&", target)
+        self.assertIn("path: signed/", target)
 
 
 class SigningTests(unittest.TestCase):
@@ -687,14 +696,16 @@ class SigningTests(unittest.TestCase):
 
             with patch.object(image, "extract_payload", side_effect=extract), \
                     patch.object(image, "signing_material", side_effect=material), \
-                    patch.object(image, "sign_image", side_effect=sign):
+                    patch.object(image, "sign_image", side_effect=sign), \
+                    patch.object(image, "sign_detached", side_effect=lambda source, signature, key: signature.write_bytes(b"test signature")):
                 ddi.sign(artifacts, output, target)
             self.assertEqual(events, [
                 ("extract", "sysext"), ("extract", "portable"), ("import-key", None),
                 ("sign", "sysext"), ("sign", "portable"), ("remove-key", None),
             ])
             self.assertTrue(all(not root.exists() for root in roots))
-            self.assertEqual({path.suffix for path in output.iterdir()}, {".raw"})
+            self.assertEqual({path.name for path in output.iterdir()},
+                             {record["filename"] for record in ddi.expected_images(target)} | set(ddi.CHECKSUM_FILES))
 
     def test_invalid_archive_fails_before_key_import(self):
         target = spec(kinds=["portable"])
@@ -846,7 +857,7 @@ class SignaturePartitionTests(unittest.TestCase):
 
 @unittest.skipUnless(
     all(shutil.which(tool) for tool in ("gpg", "gpgsm", "gpg-connect-agent", "openssl",
-                                        "systemd-repart", "mkfs.erofs", "fsck.erofs", "veritysetup", "tar", "sfdisk")),
+                                        "systemd-repart", "mkfs.erofs", "fsck.erofs", "veritysetup", "tar", "sfdisk", "gpgv")),
     "Native image and signing tools are required (no containers)",
 )
 class NativeImageTests(unittest.TestCase):
@@ -866,6 +877,9 @@ class NativeImageTests(unittest.TestCase):
             try:
                 exported = subprocess.check_output(gpg + ["--armor", "--export-secret-keys"], text=True)
                 env = {"PACKAGE_SIGNING_KEY": exported, "PACKAGE_SIGNING_PASSPHRASE": "test-key-only"}
+                public = write(work, "public.pgp", subprocess.check_output(gpg + ["--export"]))
+                verifier = work / "verify-home"
+                verifier.mkdir(mode=0o700)
                 trusted = work / "trusted.crt"
                 for index, architecture in enumerate(("amd64", "arm64")):
                     if index:
@@ -888,6 +902,7 @@ class NativeImageTests(unittest.TestCase):
                             else:
                                 image.extension_release(root, {"ID": "debian", "VERSION_ID": "13"},
                                                         record["filename"], "4.1.0", architecture)
+                                ddi.install_sysupdate(root, spec(architecture))
                             payload = work / (record["filename"] + ".tar")
                             image.make_payload(root, payload)
                             source = work / (record["filename"] + ".source")
@@ -900,6 +915,19 @@ class NativeImageTests(unittest.TestCase):
                             image.ensure_signature_read_only(output, architecture)
                             self.assertEqual(output.read_bytes(), repaired)
                             self.verify(work, output, trusted, architecture, record["kind"])
+                        artifacts = work / ("signed-" + architecture)
+                        artifacts.mkdir()
+                        for record in ddi.expected_images(spec(architecture)):
+                            shutil.copyfile(work / record["filename"], artifacts / record["filename"])
+                        ddi.write_checksums(artifacts, {
+                            record["filename"]: packages.digest(artifacts / record["filename"])
+                            for record in ddi.expected_images(spec(architecture))
+                        }, signing)
+                        ddi.validate_files(artifacts, spec(architecture), signed=True)
+                        subprocess.run([
+                            "gpgv", "--homedir", str(verifier), "--keyring", str(public),
+                            str(artifacts / "SHA256SUMS.gpg"), str(artifacts / "SHA256SUMS"),
+                        ], check=True)
                     self.assertFalse(private.exists())
                 with self.assertRaisesRegex(RuntimeError, "intentional failure"):
                     with image.signing_material(work, env) as signing:
@@ -955,6 +983,9 @@ class NativeImageTests(unittest.TestCase):
             metadata = image.release_fields((directory / name).read_text())
             self.assertEqual(metadata["SYSEXT_VERSION_ID"], "4.1.0")
             self.assertEqual(metadata["ARCHITECTURE"], image.ARCHITECTURES[architecture][0])
+            transfers = extracted / "usr/lib/sysupdate.himmelblau.d"
+            self.assertEqual({path.name for path in transfers.iterdir()},
+                             {"10-portable.transfer", "20-sysext.transfer"})
         with data.open("r+b") as stream:
             stream.seek(128)
             byte = stream.read(1)[0]

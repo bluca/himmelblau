@@ -143,18 +143,21 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ddi-signed-${{ fromJSON(inputs.spec).channel }}-${{ fromJSON(inputs.spec).distro }}-${{ fromJSON(inputs.spec).architecture }}
-          path: signed/*.raw
+          path: signed/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
   publish:
-    if: ${{ false }}
-    needs: sign
+    if: >-
+      always() && false &&
+      needs.preflight.result == 'success' &&
+      (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    needs: [preflight, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     concurrency:
-      group: cloudsmith-ddi-${{ fromJSON(inputs.spec).repository }}-${{ fromJSON(inputs.spec).channel }}-${{ fromJSON(inputs.spec).distro }}-${{ fromJSON(inputs.spec).architecture }}
+      group: cloudsmith-ddi-${{ fromJSON(inputs.spec).repository }}-${{ fromJSON(inputs.spec).channel }}-${{ fromJSON(inputs.spec).architecture }}
       cancel-in-progress: false
       queue: max
     steps:
@@ -164,6 +167,7 @@ jobs:
           path: tooling
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.sign.result == 'success'
         with:
           name: ddi-signed-${{ fromJSON(inputs.spec).channel }}-${{ fromJSON(inputs.spec).distro }}-${{ fromJSON(inputs.spec).architecture }}
           path: signed
@@ -178,7 +182,20 @@ jobs:
           tar -xzf "$CLI_DIRECTORY/cloudsmith.tar.gz" -C "$CLI_DIRECTORY"
           echo "$CLI_DIRECTORY/cloudsmith" >> "$GITHUB_PATH"
       - name: Publish raw DDIs
+        if: needs.sign.result == 'success'
         env:
           TARGET_SPEC: ${{ inputs.spec }}
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
         run: python3 tooling/.github/scripts/ddi.py publish --artifacts signed
+      - name: Install checksum signing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg gpgsm openssl
+      - name: Sign and publish sysupdate manifests
+        env:
+          TARGET_SPEC: ${{ inputs.spec }}
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
+          PACKAGE_SIGNING_KEY: ${{ secrets.PACKAGE_SIGNING_KEY }}
+          PACKAGE_SIGNING_PASSPHRASE: ${{ secrets.PACKAGE_SIGNING_PASSPHRASE }}
+          PACKAGE_SIGNING_KEY_ID: ${{ vars.PACKAGE_SIGNING_KEY_ID }}
+        run: python3 tooling/.github/scripts/ddi.py publish-checksums
