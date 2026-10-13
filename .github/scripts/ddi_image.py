@@ -33,15 +33,18 @@ PORTABLE_RUNTIME_PACKAGES = {
 
 
 def run(command, *, capture=False, extra_env=None, **kwargs):
-    env = os.environ.copy()
-    for name in ("PACKAGE_SIGNING_KEY", "PACKAGE_SIGNING_PASSPHRASE", "CLOUDSMITH_API_KEY"):
-        env.pop(name, None)
+    explicit_env = kwargs.pop("env", None)
+    env = dict(os.environ if explicit_env is None else explicit_env)
     env.update(extra_env or {})
+    for name in ("PACKAGE_SIGNING_KEY", "PACKAGE_SIGNING_PASSPHRASE"):
+        env.pop(name, None)
+    if explicit_env is None:
+        env.pop("CLOUDSMITH_API_KEY", None)
     try:
         return subprocess.run(
             [str(arg) for arg in command], check=True,
             stdout=kwargs.pop("stdout", subprocess.PIPE if capture else None),
-            env=kwargs.pop("env", env), **kwargs,
+            env=env, **kwargs,
         )
     except subprocess.CalledProcessError as error:
         if command[0] in ("gpg", "gpgsm"):
@@ -298,6 +301,8 @@ class SigningMaterial:
     private_key: Path
     certificate: Path
     fingerprint: str
+    gpg_home: Path | None = None
+    passphrase_file: Path | None = None
 
 
 @contextmanager
@@ -351,13 +356,25 @@ def signing_material(work, env=None):
             run(gpgsm + ["--armor", "--output", pem, "--export-secret-key-p8", "&" + key["grp"]],
                 input=passphrase)
             run(["openssl", "pkey", "-in", pem, "-check", "-noout"])
-            yield SigningMaterial(pem, certificate, fingerprint)
+            yield SigningMaterial(pem, certificate, fingerprint, home, password)
         finally:
             if agent_pid is not None:
                 try:
                     os.kill(agent_pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+
+
+def sign_detached(source, signature, signing):
+    if signing.gpg_home is None or signing.passphrase_file is None:
+        raise ValueError("OpenPGP signing material is required for the sysupdate manifest")
+    run([
+        "gpg", "--homedir", signing.gpg_home, "--batch", "--yes",
+        "--pinentry-mode=loopback", "--passphrase-file", signing.passphrase_file,
+        "--local-user", signing.fingerprint + "!", "--detach-sign",
+        "--output", signature, source,
+    ])
+    signature.chmod(0o644)
 
 
 def extract_payload(payload, root):
