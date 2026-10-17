@@ -19,8 +19,8 @@ on:
         description: Optional stable source revision (nightlies always use main)
         type: string
       distro:
-        description: Supported distro, including arch or gentoo, or all
-        default: all
+        description: Sysext distro (portable images always use the latest supported Fedora)
+        default: debiantesting
         type: string
       architecture:
         description: Supported architecture
@@ -70,7 +70,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ddis-${{ inputs.channel || 'nightly' }}-${{ inputs.tag || 'ddi' }}-${{ inputs.distro || 'fedora44' }}-${{ inputs.architecture || 'amd64' }}
+  group: ddis-${{ inputs.channel || 'nightly' }}-${{ inputs.tag || 'ddi' }}-${{ inputs.distro || 'debiantesting' }}-${{ inputs.architecture || 'amd64' }}
   cancel-in-progress: false
 
 jobs:
@@ -97,7 +97,7 @@ jobs:
           DDI_CHANNEL: ${{ inputs.channel || 'nightly' }}
           RELEASE_TAG: ${{ inputs.tag }}
           REQUESTED_REVISION: ${{ inputs.revision }}
-          REQUESTED_DISTRO: ${{ inputs.distro || 'fedora44' }}
+          REQUESTED_DISTRO: ${{ inputs.distro || 'debiantesting' }}
           REQUESTED_ARCHITECTURE: ${{ inputs.architecture || 'amd64' }}
         run: python3 .github/scripts/ddi.py prepare
 

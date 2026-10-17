@@ -284,6 +284,12 @@ DISTS = {
         },
         "tpm": True,
     },
+    "debiantesting": {
+        "family": "deb",
+        "image": "debian:testing",
+        "tpm": True,
+        "ddi_only": True,
+    },
     "ubuntu22.04": {
         "family": "deb",
         "image": "ubuntu:22.04",
@@ -836,7 +842,7 @@ def main():
     if args.only:
         want = {x.strip() for x in args.only.split(",") if x.strip()}
     else:
-        want = set(DISTS.keys())
+        want = {name for name, config in DISTS.items() if not config.get("ddi_only")}
 
     os.makedirs(args.out, exist_ok=True)
 

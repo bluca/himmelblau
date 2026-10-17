@@ -41,6 +41,7 @@ class SourceSelectionTests(unittest.TestCase):
             'SLE_TARGETS := sle15sp6 sle15sp7\n')
         (self.repo / "scripts/gen_dockerfiles.py").write_text(
             'DISTS = {"ubuntu24.04": {"family": "deb"}, '
+            '"debiantesting": {"family": "deb", "ddi_only": True}, '
             '"rocky8": {"family": "rpm", "arm64": False}, '
             '"rawhide": {"family": "rpm"}, '
             '"sle15sp6": {"family": "zypper"}, '
@@ -77,6 +78,25 @@ class SourceSelectionTests(unittest.TestCase):
 
     def test_retired_distro_request_is_an_empty_matrix(self):
         self.assertEqual(sp.matrix("3.1.14", distro="sle15sp6"), {"include": []})
+
+    def test_ddi_only_packages_have_no_native_publication_destination(self):
+        result = sp.source_matrix(
+            "3.1.14", self.tag_sha, self.fix_sha, "himmelblau/v_3",
+            distro="debiantesting", build_only=True,
+        )
+        specs = [json.loads(entry["spec"]) for entry in result["include"]]
+        self.assertEqual({s["architecture"] for s in specs}, {"amd64", "arm64"})
+        for spec in specs:
+            self.assertEqual(spec["distro"], "debiantesting")
+            self.assertEqual(spec["format"], "deb")
+            self.assertIsNone(spec["destination"])
+            self.assertEqual(spec["source_sha"], self.fix_sha)
+            self.assertEqual(spec["expected_packages"], [{
+                "name": "himmelblau", "version": "3.1.14-debiantesting",
+                "architectures": [spec["architecture"], "all"],
+            }])
+        with self.assertRaisesRegex(ValueError, "Unsupported distro"):
+            sp.matrix("3.1.14", distro="debiantesting")
 
     def test_retired_distro_prepare_skips_cleanly(self):
         with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch", "RELEASE_TAG": "3.1.14",
