@@ -62,6 +62,11 @@ def matrix(channel, tag="", revision="", distro="all", architecture="all", today
         match = re.search(rf"^{group}_TARGETS\s*:=\s*(.+)$", makefile, re.MULTILINE)
         if match:
             targets.extend(match[1].split())
+    if dists.get(distro, {}).get("ddi_only"):
+        targets.append(distro)
+        package_matrix["include"].extend(packages.source_matrix(
+            upstream, tag_sha, source_sha, repository, distro, architecture, build_only=True,
+        )["include"])
     if distro != "all" and distro not in targets:
         raise ValueError(f"Unsupported DDI distro: {distro}")
     fedora_targets = [t for t in targets if re.fullmatch(r"fedora\d+", t)]
@@ -270,7 +275,10 @@ def build(source, artifacts, spec, *, container_cache_ref="", refresh_build_cont
             if set(selected) != {"himmelblau", "pam-himmelblau", "nss-himmelblau"}:
                 raise ValueError("DDIs require the daemon/CLI, PAM and NSS package set")
             release = image.release_fields(json.loads((package_dir / "manifest.json").read_text())["os_release"])
-            if not release.get("VERSION_ID"):
+            if spec["distro"] == "debiantesting":
+                if release.get("ID") != "debian":
+                    raise ValueError("The Debian testing sysext must use Debian packages")
+            elif not release.get("VERSION_ID"):
                 raise ValueError("The package distro must supply VERSION_ID")
             request = {"spec": spec, "packages": selected, "release": release}
             dockerfile = image.CONFIG / "Dockerfile"

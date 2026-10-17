@@ -132,6 +132,29 @@ class MatrixTests(unittest.TestCase):
                          [("debian13", ["sysext"]), ("fedora44", ["portable"])])
         self.assertTrue(all(e["runner"] == "ubuntu-24.04-arm" for e in entries))
 
+    def test_debian_testing_changes_only_the_sysext_not_the_portable(self):
+        self.config["debiantesting"] = {"family": "deb", "ddi_only": True}
+        for channel in ("stable", "nightly"):
+            for architecture in packages.ARCHITECTURES:
+                with self.subTest(channel=channel, architecture=architecture):
+                    entries = self.entries(channel, distro="debiantesting", architecture=architecture)
+                    self.assertEqual([(e["distro"], e["kinds"]) for e in entries],
+                                     [("debiantesting", ["sysext"]), ("fedora44", ["portable"])])
+                    self.assertTrue(all(e["architecture"] == architecture for e in entries))
+                    self.assertTrue(all(e["fedora"] == "fedora44" for e in entries))
+                    sysext, portable = entries
+                    self.assertEqual(sysext["package"]["distro"], "debiantesting")
+                    self.assertEqual(sysext["package"]["format"], "deb")
+                    self.assertIsNone(sysext["package"]["destination"])
+                    self.assertEqual(sysext["package"]["expected_packages"], [{
+                        "name": "himmelblau", "version": "4.1.0-debiantesting",
+                        "architectures": [architecture, "all"],
+                    }])
+                    self.assertEqual(portable["package"]["distro"], "fedora44")
+                    self.assertEqual(portable["package"]["format"], "rpm")
+                    self.assertEqual(portable["package"]["destination"], "fedora/44")
+            self.assertNotIn("debiantesting", {e["distro"] for e in self.entries(channel)})
+
     def test_main_version_five_nightlies_publish_to_the_requested_v4_repository(self):
         with patch.object(packages, "version", return_value="5.0.0"):
             entries = self.entries("nightly", today="2026-09-26")
@@ -190,7 +213,8 @@ class RepositoryMatrixTests(unittest.TestCase):
             result = ddi.matrix("nightly", today="2026-09-26")
         entries = [json.loads(entry["spec"]) for entry in result["include"]]
         config, _ = packages.generator_config((root / "scripts/gen_dockerfiles.py").read_text())
-        self.assertEqual({entry["distro"] for entry in entries}, set(config) - {"test"})
+        self.assertEqual({entry["distro"] for entry in entries},
+                         {name for name, cfg in config.items() if name != "test" and not cfg.get("ddi_only")})
         self.assertTrue(all(entry["repository"] == "himmelblau/v_4" for entry in entries))
         self.assertEqual(len([entry for entry in entries if "portable" in entry["kinds"]]), 2)
 
@@ -353,6 +377,7 @@ class PayloadTests(unittest.TestCase):
 
     def test_release_metadata_filename_uses_unversioned_image_name(self):
         for release in ({"ID": "debian", "VERSION_ID": "13"},
+                        {"ID": "debian", "VERSION_CODENAME": "forky"},
                         {"ID": "arch"}, {"ID": "gentoo", "VERSION_ID": "2.18"}):
             for filename, version in (
                 ("himmelblau-test_4.1.0-arm64.sysext.raw", "4.1.0"),
@@ -544,38 +569,58 @@ class NativeDocumentationTests(unittest.TestCase):
 
 class BuildTests(unittest.TestCase):
     def test_package_build_reuses_validated_actions_packages_and_records_os_identity(self):
-        target = spec(kinds=["sysext"])
-        target["package"] = {"source_sha": target["source_sha"], "tag": "4.1.0"}
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            source, artifacts = work / "source", work / "artifacts"
-            write(source, "Cargo.toml", b'[workspace.package]\nversion="4.1.0"\n')
+        for distro, release, error in (
+            ("fedora44", "ID=fedora\nVERSION_ID=44\n", None),
+            ("debiantesting", "ID=debian\nVERSION_CODENAME=forky\n", None),
+            ("debiantesting", "ID=debian\nVERSION_ID=14\n", None),
+            ("fedora44", "ID=fedora\n", "VERSION_ID"),
+            ("debiantesting", "ID=fedora\nVERSION_ID=44\n", "Debian testing"),
+        ):
+            with self.subTest(distro=distro, release=release), tempfile.TemporaryDirectory() as temporary:
+                target = spec(distro=distro, kinds=["sysext"])
+                target["package"] = {"source_sha": target["source_sha"], "tag": "4.1.0"}
+                work = Path(temporary)
+                source, artifacts = work / "source", work / "artifacts"
+                write(source, "Cargo.toml", b'[workspace.package]\nversion="4.1.0"\n')
 
-            def package_build(source, directory, package_spec, **kwargs):
-                directory.mkdir()
-                (directory / "manifest.json").write_text(json.dumps({"os_release": "ID=fedora\nVERSION_ID=44\n"}))
+                def package_build(source, directory, package_spec, **kwargs):
+                    directory.mkdir()
+                    (directory / "manifest.json").write_text(json.dumps({"os_release": release}))
 
-            def container(command, **kwargs):
-                self.assertEqual(command[0], "docker")
-                self.assertNotIn("--privileged", command)
-                self.assertFalse(any("/signing" in str(arg) for arg in command))
-                if command[1] == "build":
-                    self.assertEqual(list(Path(command[-1]).iterdir()), [])
-                else:
-                    for record in ddi.expected_images(target):
-                        artifact(artifacts, record, signed=False)
-                return subprocess.CompletedProcess(command, 0)
+                def container(command, **kwargs):
+                    self.assertEqual(command[0], "docker")
+                    self.assertNotIn("--privileged", command)
+                    self.assertFalse(any("/signing" in str(arg) for arg in command))
+                    if command[1] == "build":
+                        self.assertEqual(list(Path(command[-1]).iterdir()), [])
+                        self.assertEqual(command[command.index("--file") + 1], str(image.CONFIG / "Dockerfile"))
+                        self.assertIn("FEDORA_RELEASE=44", command)
+                    else:
+                        request_path = next(arg.split(":")[0] for arg in command
+                                            if str(arg).endswith(":/request.json:ro"))
+                        request = json.loads(Path(request_path).read_text())
+                        self.assertEqual(request["release"], image.release_fields(release))
+                        self.assertEqual(request["spec"]["kinds"], ["sysext"])
+                        for record in ddi.expected_images(target):
+                            artifact(artifacts, record, signed=False)
+                    return subprocess.CompletedProcess(command, 0)
 
-            with patch.object(packages, "run", return_value=target["source_sha"]), \
-                    patch.object(packages, "build", side_effect=package_build) as build, \
-                    patch.object(packages, "validate_artifacts", return_value=[
-                        {"name": name, "filename": name + ".rpm"} for name in
-                        ("himmelblau", "nss-himmelblau", "pam-himmelblau")
-                    ]), patch.object(image, "run", side_effect=container):
-                ddi.build(source, artifacts, target, container_cache_ref="ghcr.io/test/cache")
-            self.assertEqual(build.call_count, 1)
-            self.assertEqual(build.call_args.kwargs["container_cache_ref"], "ghcr.io/test/cache")
-            self.assertTrue(all(path.name.endswith(".tar") for path in artifacts.iterdir()))
+                suffix = ".deb" if distro == "debiantesting" else ".rpm"
+                with patch.object(packages, "run", return_value=target["source_sha"]), \
+                        patch.object(packages, "build", side_effect=package_build) as build, \
+                        patch.object(packages, "validate_artifacts", return_value=[
+                            {"name": name, "filename": name + suffix} for name in
+                            ("himmelblau", "nss-himmelblau", "pam-himmelblau")
+                        ]), patch.object(image, "run", side_effect=container) as run:
+                    if error:
+                        with self.assertRaisesRegex(ValueError, error):
+                            ddi.build(source, artifacts, target)
+                        run.assert_not_called()
+                    else:
+                        ddi.build(source, artifacts, target, container_cache_ref="ghcr.io/test/cache")
+                        self.assertEqual(build.call_count, 1)
+                        self.assertEqual(build.call_args.kwargs["container_cache_ref"], "ghcr.io/test/cache")
+                        self.assertTrue(all(path.name.endswith(".tar") for path in artifacts.iterdir()))
 
     def test_artifacts_reject_sidecars_symlinks_and_missing_images(self):
         target = spec()
@@ -633,7 +678,9 @@ class BuildTests(unittest.TestCase):
         self.assertIn("  push:\n    branches: [ddi]", caller)
         self.assertIn("ref: ${{ github.sha }}", caller)
         self.assertNotIn("github.event.repository.default_branch", caller)
-        self.assertIn("REQUESTED_DISTRO: ${{ inputs.distro || 'fedora44' }}", caller)
+        self.assertIn("REQUESTED_DISTRO: ${{ inputs.distro || 'debiantesting' }}", caller)
+        dispatch = caller.split("\n  workflow_dispatch:", 1)[1].split("\n  workflow_call:", 1)[0]
+        self.assertIn("default: debiantesting", dispatch)
         self.assertIn("REQUESTED_ARCHITECTURE: ${{ inputs.architecture || 'amd64' }}", caller)
         for workflow in (caller, target):
             self.assertIn("CLOUDSMITH_PACKAGE_PUBLISHER:\n        required: false", workflow)

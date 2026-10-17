@@ -111,7 +111,7 @@ def matrix(tag, revision="", distro="all", architecture="all"):
     return source_matrix(tag, tag_sha, source_sha, REPOSITORIES[major], distro, architecture)
 
 
-def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architecture="all"):
+def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architecture="all", *, build_only=False):
     """Describe package builds after the caller has validated source provenance."""
     if architecture not in {"all", *ARCHITECTURES}:
         raise ValueError("Architecture must be all, amd64 or arm64")
@@ -124,6 +124,8 @@ def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architectu
             raise ValueError(f"Cannot find {group}_TARGETS in source Makefile")
         targets.extend(match[1].split())
     targets = [target for target in targets if target not in RETIRED_TARGETS]
+    if build_only and dists.get(distro, {}).get("ddi_only"):
+        targets.append(distro)
     if distro != "all" and distro not in targets and distro not in RETIRED_TARGETS:
         raise ValueError(f"Unsupported distro: {distro}")
     selected = [t for t in targets if distro in {"all", t}]
@@ -131,7 +133,7 @@ def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architectu
     for target in selected:
         cfg = dists[target]
         fmt = "deb" if cfg["family"] == "deb" else "rpm"
-        if cfg["family"] not in {"deb", "rpm", "zypper"} or target not in DESTINATIONS:
+        if cfg["family"] not in {"deb", "rpm", "zypper"} or (not build_only and target not in DESTINATIONS):
             raise ValueError(f"No approved native Cloudsmith destination for {target}")
         expected = []
         definitions = []
@@ -157,7 +159,7 @@ def source_matrix(tag, tag_sha, source_sha, repository, distro="all", architectu
                 continue
             spec = {"tag": tag, "tag_sha": tag_sha, "source_sha": source_sha,
                     "repository": repository, "distro": target,
-                    "destination": DESTINATIONS[target], "format": fmt,
+                    "destination": None if build_only else DESTINATIONS[target], "format": fmt,
                     "architecture": arch, "scc": bool(cfg.get("scc")),
                     "supported_architectures": [
                         candidate for candidate in ARCHITECTURES
