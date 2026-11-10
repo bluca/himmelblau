@@ -357,6 +357,58 @@ Choose the PAM setup appropriate for the host:
   `sudo aad-tool configure-pam`, then apply the reviewed changes with
   `sudo aad-tool configure-pam --really`.
 
+#### Updating the images with systemd-sysupdate
+
+Each sysext includes a `himmelblau` systemd-sysupdate component under
+`/usr/lib/sysupdate.himmelblau.d/`. Its two `.transfer` files update the
+distribution-specific sysext and the portable image together, using the same
+version, channel and architecture. This configuration requires systemd 257 or newer.
+
+As root on the target machine, initialize the local keyring from the system
+keyring only if the local one does not already exist:
+
+```bash
+if [ ! -e /etc/systemd/import-pubring.pgp ]; then
+    cp /usr/lib/systemd/import-pubring.pgp /etc/systemd/import-pubring.pgp
+fi
+```
+
+Download the Himmelblau public signing key:
+
+```bash
+curl --fail --location --output himmelblau.asc \
+    https://packages.himmelblau-idm.org/himmelblau.asc
+gpg --show-keys --with-fingerprint himmelblau.asc
+```
+
+After confirming the fingerprint
+`E87F D8D4 63A5 E481 4B9C DBA9 0CC0 D400 2C42 5E03`, import it into the
+local systemd keyring without replacing existing keys:
+
+```bash
+gpg --no-default-keyring --keyring /etc/systemd/import-pubring.pgp \
+    --import himmelblau.asc
+```
+
+The transfers keep three versions and protect the version of the installed
+sysext. Images are staged in versioned directories:
+
+* `/var/lib/himmelblau-ddi/himmelblaud.v/`
+* `/var/lib/extensions/himmelblau.sysext.raw.v/`
+
+For a manual update, run:
+
+```bash
+systemd-sysupdate --component=himmelblau list
+systemd-sysupdate --component=himmelblau update
+```
+
+On hosts with systemd 262 or newer, the attached
+`himmelblaud-sysupdate-notify.socket` handles completed updates of the `himmelblau`
+component automatically whenever systemd-sysupdate is scheduled to run by its timer.
+It refreshes the host sysexts, attaches or reattaches the broker and
+compliance units for every running user manager and for the system instance.
+
 ### Uninstall
 
 ```bash
