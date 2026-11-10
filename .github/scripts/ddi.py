@@ -45,7 +45,7 @@ def matrix(channel, tag="", revision="", distro="all", architecture="all", times
         if tag or revision:
             raise ValueError("Nightly DDIs always use main, without a tag or revision override")
         source_sha = tag_sha = packages.resolve(
-            shared[0]["source_sha"] if shared else "refs/remotes/origin/main"
+            shared[0]["source_sha"] if shared else "HEAD"
         )
         upstream = packages.version(source_sha)
         if not re.fullmatch(r"\d+\.\d+\.\d+", upstream):

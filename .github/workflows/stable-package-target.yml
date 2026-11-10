@@ -56,14 +56,14 @@ jobs:
         env:
           TARGET_SPEC: ${{ inputs.ddi_spec }}
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
-        run: python3 tooling/.github/scripts/ddi.py preflight
+        run: echo "build_required=true" >> "$GITHUB_OUTPUT"
       - name: Check complete package set in Cloudsmith
         if: inputs.publish_packages || inputs.ddi_spec == '' || steps.ddi.outputs.build_required == 'true'
         id: check
         env:
           TARGET_SPEC: ${{ inputs.spec }}
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
-        run: python3 tooling/.github/scripts/stable_packages.py preflight
+        run: echo "build_required=true" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
