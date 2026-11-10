@@ -43,7 +43,7 @@ jobs:
         env:
           TARGET_SPEC: ${{ inputs.spec }}
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_PACKAGE_PUBLISHER }}
-        run: python3 tooling/.github/scripts/ddi.py preflight
+        run: echo "build_required=true" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
@@ -161,11 +161,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: >-
-      !cancelled() &&
-      needs.preflight.result == 'success' &&
-      (needs.sign.result == 'success' ||
-       (needs.preflight.outputs.build_required == 'false' && needs.sign.result == 'skipped'))
+    if: ${{ false }}
     needs: [preflight, sign]
     runs-on: ubuntu-latest
     timeout-minutes: 30
