@@ -16,7 +16,22 @@ scheduled by matching
 units.
 Custom compliance discovery scripts run on demand in the transient system unit
 .BR himmelblaud-tasks-compliance.service ,
-which is removed after execution.
+which is removed after execution. The tasks daemon writes a structured journal
+entry containing the script's executed bytes in the binary
+.B HIMMELBLAU_SCRIPT
+field, with
+.B HIMMELBLAU_POLICY_ID
+and
+.B HIMMELBLAU_SCRIPT_UNIT
+identifying the policy and transient unit. These records follow journal retention
+and access controls; script contents may contain sensitive data.
+For a lossless export:
+.PP
+.nf
+journalctl -u himmelblaud-tasks.service HIMMELBLAU_POLICY_ID=POLICY_ID \e
+  -n 1 -o export --no-pager
+.fi
+.PP
 The separate user unit
 .B himmelblau-compliance-check.service
 requests a full policy check (so that it originates from the user) via
